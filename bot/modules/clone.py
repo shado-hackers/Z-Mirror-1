@@ -1,19 +1,18 @@
+#!/usr/bin/env python3
+from time import time
 from asyncio import gather, sleep
 from json import loads
-from random import SystemRandom
-from re import split as re_split
-from string import ascii_letters, digits
-
+from secrets import token_urlsafe
 from aiofiles.os import path as aiopath
 from pyrogram.filters import command
 from pyrogram.handlers import MessageHandler
 
 from bot import (LOGGER, bot, categories_dict, config_dict, download_dict,
                  download_dict_lock)
-from bot.helper.ext_utils.bot_utils import (cmd_exec, get_telegraph_list,
-                                            is_gdrive_link, is_rclone_path,
-                                            is_share_link, new_task,
-                                            sync_to_async)
+from bot.helper.ext_utils.bot_utils import (arg_parser, cmd_exec, get_readable_time,
+                                            get_telegraph_list, is_gdrive_link,
+                                            is_rclone_path, is_share_link,
+                                            new_task, sync_to_async)
 from bot.helper.ext_utils.exceptions import DirectDownloadLinkException
 from bot.helper.ext_utils.help_messages import CLONE_HELP_MESSAGE
 from bot.helper.ext_utils.task_manager import limit_checker
@@ -55,7 +54,8 @@ async def rcloneNode(client, message, link, dst_path, rcf, listener):
         config_path = 'rclone.conf'
 
     if not await aiopath.exists(config_path):
-        await sendMessage(message, f"Rclone Config: {config_path} not Exists!")
+        rcmsg = await sendMessage(message, f"Rclone Config: {config_path} not Exists!")
+        await auto_delete_message(message, rcmsg)
         await delete_links(message)
         return
 
@@ -67,18 +67,26 @@ async def rcloneNode(client, message, link, dst_path, rcf, listener):
             return
 
     dst_path = (dst_path or config_dict['RCLONE_PATH']).strip('/')
+    if not is_rclone_path(dst_path):
+        rcmsg = await sendMessage(message, 'Wrong Rclone Clone Destination!')
+        await auto_delete_message(message, rcmsg)
+        await delete_links(message)
+        return
     if dst_path.startswith('mrcc:'):
         if config_path != f'rclone/{message.from_user.id}.conf':
-            await sendMessage(message, 'You should use same rclone.conf to clone between pathies!')
+            rcmsg = await sendMessage(message, 'You should use same rclone.conf to clone between paths!')
+            await auto_delete_message(message, rcmsg)
             await delete_links(message)
             return
+        dst_path = dst_path.lstrip('mrcc:')
     elif config_path != 'rclone.conf':
-        await sendMessage(message, 'You should use same rclone.conf to clone between pathies!')
+        rcmsg = await sendMessage(message, 'You should use same rclone.conf to clone between paths!')
+        await auto_delete_message(message, rcmsg)
         await delete_links(message)
         return
 
     remote, src_path = link.split(':', 1)
-    src_path = src_path .strip('/')
+    src_path = src_path.strip('/')
 
     cmd = ['rclone', 'lsjson', '--fast-list', '--stat',
            '--no-modtime', '--config', config_path, f'{remote}:{src_path}']
@@ -86,7 +94,8 @@ async def rcloneNode(client, message, link, dst_path, rcf, listener):
     if res[2] != 0:
         if res[2] != -9:
             msg = f'Error: While getting rclone stat. Path: {remote}:{src_path}. Stderr: {res[1][:4000]}'
-            await sendMessage(message, msg)
+            rcmsg = await sendMessage(message, msg)
+            await auto_delete_message(message, rcmsg)
         await delete_links(message)
         return
     rstat = loads(res[0])
@@ -103,22 +112,18 @@ async def rcloneNode(client, message, link, dst_path, rcf, listener):
     RCTransfer = RcloneTransferHelper(listener, name)
     LOGGER.info(
         f'Clone Started: Name: {name} - Source: {link} - Destination: {dst_path}')
-    gid = ''.join(SystemRandom().choices(ascii_letters + digits, k=12))
+    gid = token_urlsafe(12)
     async with download_dict_lock:
-        download_dict[message.id] = RcloneStatus(
-            RCTransfer, message, gid, 'cl', listener.extra_details)
+        download_dict[message.id] = RcloneStatus(RCTransfer, message, gid, 'cl', listener.extra_details)
     await sendStatusMessage(message)
     link, destination = await RCTransfer.clone(config_path, remote, src_path, dst_path, rcf, mime_type)
     if not link:
         await delete_links(message)
         return
     LOGGER.info(f'Cloning Done: {name}')
-    cmd1 = ['rclone', 'lsf', '--fast-list', '-R',
-            '--files-only', '--config', config_path, destination]
-    cmd2 = ['rclone', 'lsf', '--fast-list', '-R',
-            '--dirs-only', '--config', config_path, destination]
-    cmd3 = ['rclone', 'size', '--fast-list', '--json',
-            '--config', config_path, destination]
+    cmd1 = ['rclone', 'lsf', '--fast-list', '-R', '--files-only', '--config', config_path, destination]
+    cmd2 = ['rclone', 'lsf', '--fast-list', '-R', '--dirs-only', '--config', config_path, destination]
+    cmd3 = ['rclone', 'size', '--fast-list', '--json', '--config', config_path, destination]
     res1, res2, res3 = await gather(cmd_exec(cmd1), cmd_exec(cmd2), cmd_exec(cmd3))
     if res1[2] != res2[2] != res3[2] != 0:
         if res1[2] == -9:
@@ -126,8 +131,7 @@ async def rcloneNode(client, message, link, dst_path, rcf, listener):
         files = None
         folders = None
         size = 0
-        LOGGER.error(
-            f'Error: While getting rclone stat. Path: {destination}. Stderr: {res1[1][:4000]}')
+        LOGGER.error(f'Error: While getting rclone stat. Path: {destination}. Stderr: {res1[1][:4000]}')
     else:
         files = len(res1[0].split("\n"))
         folders = len(res2[0].split("\n"))
@@ -137,6 +141,12 @@ async def rcloneNode(client, message, link, dst_path, rcf, listener):
 
 
 async def gdcloneNode(message, link, listener):
+    if sender_chat := message.sender_chat:
+        tag = sender_chat.title
+    elif username := message.from_user.username:
+        tag = f"@{username}"
+    else:
+        tag = message.from_user.mention
     if not is_gdrive_link(link) and is_share_link(link):
         process_msg = await sendMessage(message, f"Processing: <code>{link}</code>")
         try:
@@ -149,14 +159,23 @@ async def gdcloneNode(message, link, listener):
                 await editMessage(process_msg, str(e))
                 await delete_links(message)
                 return
-        await deleteMessage(process_msg)
+        finally:
+            await auto_delete_message(process_msg)
 
     if is_gdrive_link(link):
+        LOGGER.info(f'Cloning: {link}')
+        start_time = time()
         gd = GoogleDriveHelper()
         name, mime_type, size, files, _ = await sync_to_async(gd.count, link)
         if mime_type is None:
-            await sendMessage(message, name)
+            elapsed = time() - start_time
+            LOGGER.error(f'Error in cloning: {name}')
+            msg = f'Sorry {tag}!\nYour clone has been stopped.'
+            msg += f'\n\n<code>Reason : </code>{name}'
+            msg += f'\n<code>Elapsed: </code>{get_readable_time(elapsed)}'
+            cmsg = await sendMessage(message, msg)
             await delete_links(message)
+            await auto_delete_message(message, cmsg)
             return
         if config_dict['STOP_DUPLICATE']:
             LOGGER.info('Checking File/Folder if already in Drive...')
@@ -176,55 +195,52 @@ async def gdcloneNode(message, link, listener):
         await listener.onDownloadStart()
         LOGGER.info(f'Clone Started: Name: {name} - Source: {link}')
         drive = GoogleDriveHelper(name, listener=listener)
-        if files <= 20:
+        if files <= 10:
             msg = await sendMessage(message, f"Cloning: <code>{link}</code>")
-            link, size, mime_type, files, folders, dir_id = await sync_to_async(drive.clone, link, listener.drive_id or config_dict['GDRIVE_ID'])
+            link, size, mime_type, files, folders = await sync_to_async(drive.clone, link, listener.drive_id)
             await deleteMessage(msg)
         else:
-            gid = ''.join(SystemRandom().choices(ascii_letters + digits, k=12))
+            gid = token_urlsafe(12)
             async with download_dict_lock:
-                download_dict[message.id] = GdriveStatus(
-                    drive, size, message, gid, 'cl', listener.extra_details)
+                download_dict[message.id] = GdriveStatus(drive, size, message, gid, 'cl', listener.extra_details)
             await sendStatusMessage(message)
-            link, size, mime_type, files, folders, dir_id = await sync_to_async(drive.clone, link, listener.drive_id or config_dict['GDRIVE_ID'])
+            link, size, mime_type, files, folders = await sync_to_async(drive.clone, link, listener.drive_id)
         if not link:
             await delete_links(message)
             return
         LOGGER.info(f'Cloning Done: {name}')
-        await listener.onUploadComplete(link, size, files, folders, mime_type, name, drive_id=dir_id)
+        await listener.onUploadComplete(link, size, files, folders, mime_type, name)
     else:
-        reply_message = await sendMessage(message, CLONE_HELP_MESSAGE.format_map({'cmd': message.command[0]}))
-        await auto_delete_message(message, reply_message)
+        cmsg = await sendMessage(message, CLONE_HELP_MESSAGE.format_map({'cmd': message.command[0]}))
+        await auto_delete_message(message, cmsg)
+        await delete_links(message)
 
 
 @new_task
 async def clone(client, message):
-    mesg = message.text.split('\n')
-    message_args = mesg[0].split(maxsplit=1)
-    link = ''
-    select = False
-    multi = 0
-    raw_url = None
-    if len(message_args) > 1:
-        index = 1
-        args = mesg[0].split(maxsplit=2)
-        args.pop(0)
-        for x in args:
-            x = x.strip()
-            if x == 's':
-                select = True
-                index += 1
-            elif x.isdigit():
-                multi = int(x)
-                mi = index
-            else:
-                break
-        if multi == 0:
-            message_args = mesg[0].split(maxsplit=index)
-            if len(message_args) > index:
-                x = message_args[index].strip()
-                if not x.startswith(('up:', 'rcf:', 'id:', 'index:')):
-                    link = re_split(r' up: | rcf: | id: | index: ', x)[0].strip()
+    input_list = message.text.split(' ')
+
+    arg_base = {
+                'link'  : '', 
+                '-m'    : 0, 
+                '-up'   : '',
+                '-rcf'  : '', 
+                '-s'    : False, 
+                '-id'   : '', 
+                '-index': ''
+            }
+
+    args = arg_parser(input_list[1:], arg_base)
+
+    multi = int(args['-m']) if args['-m'] and args['-m'].isdigit() else 0
+
+    dst_path    = args['-up']
+    rcf         = args['-rcf']
+    link        = args['link']
+    select      = args['-s']
+    drive_id    = args['-id']
+    index_link  = args['-index']
+    raw_url     = None
 
     if sender_chat := message.sender_chat:
         tag = sender_chat.title
@@ -232,60 +248,29 @@ async def clone(client, message):
         tag = f"@{username}"
     else:
         tag = message.from_user.mention
-    if reply_to := message.reply_to_message:
-        if len(link) == 0:
-            link = reply_to.text.split('\n', 1)[0].strip()
-        if sender_chat := reply_to.sender_chat:
-            tag = sender_chat.title
-        elif not reply_to.from_user.is_bot:
-            if username := reply_to.from_user.username:
-                tag = f"@{username}"
-            else:
-                tag = reply_to.from_user.mention
 
-    rcf = mesg[0].split(' rcf: ', 1)
-    rcf = re_split(' up: | id: | index: ', rcf[1])[
-        0].strip() if len(rcf) > 1 else None
-
-    dst_path = mesg[0].split(' up: ', 1)
-    dst_path = re_split(' rcf: | id: | index: ', dst_path[1])[
-        0].strip() if len(dst_path) > 1 else None
-
-    drive_id = mesg[0].split(' id: ', 1)
-    drive_id = re_split(' rcf: | up: | index: ', drive_id[1])[
-        0].strip() if len(drive_id) > 1 else None
-    if drive_id and is_gdrive_link(drive_id):
-        drive_id = GoogleDriveHelper.getIdFromUrl(drive_id)
-
-    index_link = mesg[0].split(' index: ', 1)
-    index_link = re_split(' rcf: | up: | id: ', index_link[1])[
-        0].strip() if len(index_link) > 1 else None
-    if index_link and not index_link.startswith(('http://', 'https://')):
-        index_link = None
-    if index_link and not index_link.endswith('/'):
-        index_link += '/'
+    if not link and (reply_to := message.reply_to_message):
+        link = reply_to.text.split('\n', 1)[0].strip()
 
     @new_task
     async def __run_multi():
-        if multi <= 1:
-            return
-        await sleep(4)
-        nextmsg = await client.get_messages(chat_id=message.chat.id, message_ids=message.reply_to_message_id + 1)
-        msg = message.text.split(maxsplit=mi+1)
-        msg[mi] = f"{multi - 1}"
-        nextmsg = await sendMessage(nextmsg, " ".join(msg))
-        nextmsg = await client.get_messages(chat_id=message.chat.id, message_ids=nextmsg.id)
-        if message.sender_chat:
-            nextmsg.sender_chat = message.sender_chat
-        nextmsg.from_user = message.from_user
-        await sleep(4)
-        clone(client, nextmsg)
+        if multi > 1:
+            await sleep(5)
+            msg = [s.strip() for s in input_list]
+            index = msg.index('-m')
+            msg[index+1] = f"{multi - 1}"
+            nextmsg = await client.get_messages(chat_id=message.chat.id, message_ids=message.reply_to_message_id + 1)
+            nextmsg = await sendMessage(nextmsg, " ".join(msg))
+            nextmsg = await client.get_messages(chat_id=message.chat.id, message_ids=nextmsg.id)
+            nextmsg.from_user = message.from_user
+            await sleep(5)
+            clone(client, nextmsg)
 
     __run_multi()
 
     if not link:
-        reply_message = await sendMessage(message, CLONE_HELP_MESSAGE.format_map({'cmd': message.command[0]}))
-        await auto_delete_message(message, reply_message)
+        cmsg = await sendMessage(message, CLONE_HELP_MESSAGE.format_map({'cmd': message.command[0]}))
+        await auto_delete_message(message, cmsg)
         await delete_links(message)
         return
 
@@ -321,8 +306,8 @@ async def clone(client, message):
         if error_button is not None:
             error_button = error_button.build_menu(2)
         await delete_links(message)
-        reply_message = await sendMessage(message, final_msg, error_button)
-        await auto_delete_message(message, reply_message)
+        cmsg = await sendMessage(message, final_msg, error_button)
+        await auto_delete_message(message, cmsg)
         return
 
     logMessage = await sendLogMessage(message, link, tag)
@@ -332,11 +317,11 @@ async def clone(client, message):
             await delete_links(message)
             return
         if not config_dict['RCLONE_PATH'] and not dst_path:
-            await sendMessage(message, 'Destinantion not specified!')
+            await sendMessage(message, 'Destination not specified!')
             await delete_links(message)
             return
-        listener = MirrorLeechListener(message, tag=tag, select=select, isClone=True, drive_id=drive_id,
-                                       index_link=index_link, dmMessage=dmMessage, logMessage=logMessage, raw_url=raw_url)
+        listener = MirrorLeechListener(message, tag=tag, select=select, isClone=True,
+                                       dmMessage=dmMessage, logMessage=logMessage, raw_url=raw_url)
         await rcloneNode(client, message, link, dst_path, rcf, listener)
     else:
         if not drive_id and len(categories_dict) > 1:
@@ -354,5 +339,4 @@ async def clone(client, message):
         await gdcloneNode(message, link, listener)
 
 
-bot.add_handler(MessageHandler(clone, filters=command(
-    BotCommands.CloneCommand) & CustomFilters.authorized))
+bot.add_handler(MessageHandler(clone, filters=command(BotCommands.CloneCommand) & CustomFilters.authorized))

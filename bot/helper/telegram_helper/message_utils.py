@@ -1,18 +1,18 @@
+#!/usr/bin/env python3
 from asyncio import sleep
 from datetime import datetime, timedelta, timezone
 from time import time
 from re import match as re_match
 
-from pyrogram.errors import (FloodWait, PeerIdInvalid, RPCError,
-                             UserNotParticipant)
+from pyrogram.errors import (FloodWait, PeerIdInvalid, RPCError, UserNotParticipant)
 from pyrogram.types import ChatPermissions
 
 from bot import (LOGGER, Interval, bot, bot_name, cached_dict, categories_dict,
                  config_dict, download_dict_lock, status_reply_dict,
                  status_reply_dict_lock, user)
-from bot.helper.ext_utils.bot_utils import (get_readable_message, setInterval,
-                                            get_readable_file_size, sync_to_async)
+from bot.helper.ext_utils.bot_utils import get_readable_message, setInterval, sync_to_async
 from bot.helper.telegram_helper.button_build import ButtonMaker
+from bot.helper.ext_utils.exceptions import TgLinkException
 
 
 async def sendMessage(message, text, buttons=None):
@@ -85,7 +85,7 @@ async def deleteMessage(message):
 
 
 async def auto_delete_message(cmd_message=None, bot_message=None):
-    if config_dict['AUTO_DELETE_MESSAGE_DURATION'] != -1:
+    if config_dict['DELETE_LINKS'] and int(config_dict['AUTO_DELETE_MESSAGE_DURATION']) > 0:
         await sleep(config_dict['AUTO_DELETE_MESSAGE_DURATION'])
         if cmd_message is not None:
             await deleteMessage(cmd_message)
@@ -103,38 +103,53 @@ async def delete_all_messages():
                 LOGGER.error(str(e))
 
 
+async def delete_links(message):
+    if config_dict['DELETE_LINKS']:
+        if reply_to := message.reply_to_message:
+            await deleteMessage(reply_to)
+        await deleteMessage(message)
+
+
 async def get_tg_link_content(link):
+    message = None
     if link.startswith('https://t.me/'):
         private = False
-        msg = re_match(r"https:\/\/t\.me\/(?:c\/)?([^\/]+)\/([0-9]+)", link)
+        msg = re_match(r"https:\/\/t\.me\/(?:c\/)?([^\/]+)(?:\/[^\/]+)?\/([0-9]+)", link)
     else:
         private = True
         msg = re_match(
             r"tg:\/\/openmessage\?user_id=([0-9]+)&message_id=([0-9]+)", link)
         if not user:
-            raise Exception('USER_SESSION_STRING required for this private link!')
+            raise TgLinkException('USER_SESSION_STRING required for this private link!')
 
     chat = msg.group(1)
     msg_id = int(msg.group(2))
     if chat.isdigit():
         chat = int(chat) if private else int(f'-100{chat}')
 
-    try:
-        await bot.get_chat(chat)
-    except Exception as e:
-        private = True
-        if not user:
-            raise e
+    if not private:
+        try:
+            message = await bot.get_messages(chat_id=chat, message_ids=msg_id)
+            if message.empty:
+                private = True
+        except Exception as e:
+            private = True
+            if not user:
+                raise e
 
-    if private:
-        if (message := await user.get_messages(chat_id=chat, message_ids=msg_id)) and not message.empty:
-            return message, 'user'
+    if private and user:
+        try:
+            user_message = await user.get_messages(chat_id=chat, message_ids=msg_id)
+        except Exception as e:
+            raise TgLinkException(f"I don't have access to that chat!\nAdd me there first. ERROR: {e}") from e
+        if not user_message.empty:
+            return user_message, 'user'
         else:
-            raise Exception("Mostly message has been deleted!")
-    elif (message := await bot.get_messages(chat_id=chat, message_ids=msg_id)) and not message.empty:
+            raise TgLinkException("Private: Please report!")
+    elif not private:
         return message, 'bot'
     else:
-        raise Exception("Mostly message has been deleted!")
+        raise TgLinkException("Bot can't download from GROUPS without joining!")
 
 
 async def update_all_messages(force=False):
@@ -188,7 +203,10 @@ async def isBot_canDm(message, dmMode, isLeech=False, button=None):
     if dmMode == 'leech' and not isLeech:
         return None, button
     user = await user_info(message._client, message.from_user.id)
-    if user.status == user.status.LONG_AGO:
+    try:
+        dm_check = await message._client.send_message(message.from_user.id, "Your task added to download.")
+        await dm_check.delete()
+    except Exception as e:
         if button is None:
             button = ButtonMaker()
         _msg = "You need to <b>Start</b> me in <b>DM</b>."
@@ -310,12 +328,6 @@ async def message_filter(message):
         message.id = None
         return _msg
 
-async def delete_links(message):
-    if config_dict['DELETE_LINKS']:
-        if reply_to := message.reply_to_message:
-            await deleteMessage(reply_to)
-        await deleteMessage(message)
-
 
 async def anno_checker(message):
     msg_id = message.id
@@ -341,7 +353,8 @@ async def open_category_btns(message):
     buttons = ButtonMaker()
     for _name in categories_dict.keys():
         buttons.ibutton(f'{_name}', f'scat {user_id} {msg_id} {_name}')
-    prompt = await sendMessage(message, '<b>Select the category where you want to upload</b>', buttons.build_menu(2))
+    msg = f'<b>Select where you want to upload</b>\n\nUser: {message.from_user.mention}'
+    prompt = await sendMessage(message, msg, buttons.build_menu(2))
     cached_dict[msg_id] = [None, None]
     start_time = time()
     while time() - start_time <= 30:

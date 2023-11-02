@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from io import BytesIO
 
 from pyrogram.filters import command
@@ -35,7 +36,5 @@ async def shell(_, message):
         await sendMessage(message, 'No Reply')
 
 
-bot.add_handler(MessageHandler(shell, filters=command(
-    BotCommands.ShellCommand) & CustomFilters.owner))
-bot.add_handler(EditedMessageHandler(shell, filters=command(
-    BotCommands.ShellCommand) & CustomFilters.owner))
+bot.add_handler(MessageHandler(shell, filters=command(BotCommands.ShellCommand) & CustomFilters.owner))
+bot.add_handler(EditedMessageHandler(shell, filters=command(BotCommands.ShellCommand) & CustomFilters.owner))

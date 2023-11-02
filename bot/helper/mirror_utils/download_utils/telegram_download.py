@@ -1,14 +1,15 @@
+#!/usr/bin/env python3
 from asyncio import Lock
 from logging import ERROR, getLogger
 from time import time
 
-from bot import (IS_PREMIUM_USER, LOGGER, bot, download_dict,
+from bot import (config_dict, IS_PREMIUM_USER, LOGGER, bot, download_dict,
                  download_dict_lock, non_queued_dl, queue_dict_lock, user)
 from bot.helper.ext_utils.task_manager import is_queued, limit_checker, stop_duplicate_check
 from bot.helper.mirror_utils.status_utils.queue_status import QueueStatus
 from bot.helper.mirror_utils.status_utils.telegram_status import TelegramStatus
 from bot.helper.telegram_helper.message_utils import (delete_links, sendMessage,
-                                                      sendStatusMessage)
+                                                      sendStatusMessage, auto_delete_message)
 
 global_lock = Lock()
 GLOBAL_GID = set()
@@ -54,8 +55,7 @@ class TelegramDownloadHelper:
         if self.__is_cancelled:
             if IS_PREMIUM_USER:
                 user.stop_transmission()
-            else:
-                bot.stop_transmission()
+            bot.stop_transmission()
         self.__processed_bytes = current
 
     async def __onDownloadError(self, error):
@@ -86,13 +86,7 @@ class TelegramDownloadHelper:
         elif not self.__is_cancelled:
             await self.__onDownloadError('Internal error occurred')
 
-    async def add_download(self, message, path, filename, session):
-        if IS_PREMIUM_USER and session != 'bot' or session == 'user':
-            if not self.__listener.isSuperGroup and session != 'user':
-                await sendMessage(message, 'Use SuperGroup to download with User!')
-                return
-            message = await user.get_messages(chat_id=message.chat.id, message_ids=message.id)
-
+    async def add_download(self, message, path, filename):
         media = message.document or message.photo or message.video or message.audio or \
             message.voice or message.video_note or message.sticker or message.animation or None
         if media is not None:
@@ -112,19 +106,20 @@ class TelegramDownloadHelper:
 
                 msg, button = await stop_duplicate_check(name, self.__listener)
                 if msg:
-                    await sendMessage(self.__listener.message, msg, button)
+                    tmsg = await sendMessage(self.__listener.message, msg, button)
                     await delete_links(self.__listener.message)
+                    await auto_delete_message(self.__listener.message, tmsg)
                     return
                 if limit_exceeded := await limit_checker(size, self.__listener):
-                    await sendMessage(self.__listener.message, limit_exceeded)
+                    tmsg = await sendMessage(self.__listener.message, limit_exceeded)
                     await delete_links(self.__listener.message)
+                    await auto_delete_message(self.__listener.message, tmsg)
                     return
                 added_to_queue, event = await is_queued(self.__listener.uid)
                 if added_to_queue:
                     LOGGER.info(f"Added to Queue/Download: {name}")
                     async with download_dict_lock:
-                        download_dict[self.__listener.uid] = QueueStatus(
-                            name, size, gid, self.__listener, 'dl')
+                        download_dict[self.__listener.uid] = QueueStatus(name, size, gid, self.__listener, 'dl')
                     await self.__listener.onDownloadStart()
                     await sendStatusMessage(self.__listener.message)
                     await event.wait()
@@ -143,5 +138,4 @@ class TelegramDownloadHelper:
 
     async def cancel_download(self):
         self.__is_cancelled = True
-        LOGGER.info(
-            f'Cancelling download on user request: name: {self.name} id: {self.__id}')
+        LOGGER.info(f'Cancelling download on user request: name: {self.name} id: {self.__id}')

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from bot import LOGGER
 from bot.helper.ext_utils.bot_utils import MirrorStatus, get_readable_file_size
 
@@ -11,7 +12,7 @@ class QueueStatus:
         self.__status = status
         self.message = self.__listener.message
         self.extra_details = self.__listener.extra_details
-        self.engine = "Queue v2.1"
+        self.engine = "Queue v2.2"
 
     def gid(self):
         return self.__gid

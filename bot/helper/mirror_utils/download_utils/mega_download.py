@@ -1,6 +1,7 @@
+#!/usr/bin/env python3
+from secrets import token_urlsafe
+from aiofiles.os import makedirs
 from asyncio import Event
-from random import SystemRandom
-from string import ascii_letters, digits
 
 from aiofiles.os import makedirs
 from mega import MegaApi, MegaError, MegaListener, MegaRequest, MegaTransfer
@@ -13,7 +14,8 @@ from bot.helper.ext_utils.task_manager import (is_queued, limit_checker,
                                                stop_duplicate_check)
 from bot.helper.mirror_utils.status_utils.mega_download_status import MegaDownloadStatus
 from bot.helper.mirror_utils.status_utils.queue_status import QueueStatus
-from bot.helper.telegram_helper.message_utils import (delete_links,
+from bot.helper.telegram_helper.message_utils import (auto_delete_message,
+                                                      delete_links,
                                                       sendMessage,
                                                       sendStatusMessage)
 
@@ -147,28 +149,31 @@ async def add_mega_download(mega_link, path, listener, name):
         await executor.do(folder_api.loginToFolder, (mega_link,))
         node = await sync_to_async(folder_api.authorizeNode, mega_listener.node)
     if mega_listener.error is not None:
-        await sendMessage(listener.message, str(mega_listener.error))
+        mmsg = await sendMessage(listener.message, str(mega_listener.error))
         await executor.do(api.logout, ())
         if folder_api is not None:
             await executor.do(folder_api.logout, ())
         await delete_links(listener.message)
+        await auto_delete_message(listener.message, mmsg)
         return
 
     name = name or node.getName()
     msg, button = await stop_duplicate_check(name, listener)
     if msg:
-        await sendMessage(listener.message, msg, button)
+        mmsg = await sendMessage(listener.message, msg, button)
         await executor.do(api.logout, ())
         if folder_api is not None:
             await executor.do(folder_api.logout, ())
         await delete_links(listener.message)
+        await auto_delete_message(listener.message, mmsg)
         return
 
-    gid = ''.join(SystemRandom().choices(ascii_letters + digits, k=8))
+    gid = token_urlsafe(8)
     size = api.getSize(node)
     if limit_exceeded := await limit_checker(size, listener, isMega=True):
-        await sendMessage(listener.message, limit_exceeded)
+        mmsg = await sendMessage(listener.message, limit_exceeded)
         await delete_links(listener.message)
+        await auto_delete_message(listener.message, mmsg)
         return
     added_to_queue, event = await is_queued(listener.uid)
     if added_to_queue:
